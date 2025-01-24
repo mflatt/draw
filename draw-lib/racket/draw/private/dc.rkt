@@ -795,6 +795,32 @@
        (cairo_paint cr)
        (cairo_set_operator cr CAIRO_OPERATOR_OVER)))
 
+    (define group-alphas null)
+    
+    (define/public (start-alpha g-alpha)
+      (with-cr
+        (check-ok 'start-alpha)
+        cr
+        (set! group-alphas (cons (cons g-alpha alpha) group-alphas))
+        (cond
+          [(cairo_push_group cr)
+           ;; supported
+           (set! alpha 1.0)]
+          [else
+           ;; not supported
+           (set! alpha (* alpha g-alpha))])))
+
+    (define/public (end-alpha)
+      (with-cr
+       (check-ok 'end-alpha)
+        cr
+        (unless (null? group-alphas)
+          (set! alpha (cdar group-alphas))
+          (when (cairo_pop_group_to_source cr)
+            ;; supported
+            (cairo_paint_with_alpha cr (* alpha (caar group-alphas))))
+          (set! group-alphas (cdr group-alphas)))))
+
     (def/public (copy [real? x] [real? y] [nonnegative-real? w] [nonnegative-real? h]
                       [real? x2] [real? y2])
        (internal-copy x y w h x2 y2 #f))

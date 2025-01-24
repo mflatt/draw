@@ -326,6 +326,14 @@
                                                            -> _void
                                                            -> (values x y)))
 
+;; Groups
+(define-cairo cairo_push_group (_cfun _cairo_t -> _void)
+  ;; 1.2 and later
+  #:fail (lambda () (lambda (cr) #f)))
+(define-cairo cairo_pop_group_to_source (_cfun _cairo_t -> _void)
+  ;; 1.2 and later
+  #:fail (lambda () (lambda (cr) #f)))
+
 ;; Stream surfaces
 
 ;;  The first argument to a stream-surface creation
