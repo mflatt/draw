@@ -35,7 +35,7 @@
                   region 
                   alpha
                   transformation 
-                  ;; virtual vaules for the target dc:
+                  ;; virtual values for the target dc:
                   scale-x scale-y 
                   origin-x origin-y
                   rotation
@@ -353,35 +353,70 @@
   (send dc rotate (dc-state-rotation state))
   state)
 
-(define (apply-transform state t)
-  (define im (dc-state-initial-matrix state))
+(define (make-layer-in-transformation dc t state)
+  ;; The transformation on a layer when it is drawn depends on
+  ;; the transformation when the layer was created, so create it
+  ;; with a remembered transformation. We don't worry about other
+  ;; state, such as the pen, because a recording from a layer will
+  ;; start by installing that state. Meanwhile, it's not actually
+  ;; `t` that we need to install, but `t` relative to `state`
+  ;; as composed with the current transformation in `dc`.
+  (define old-t (send dc get-transformation))
+  (send dc transform (transform-wrt t state))
+  (define layer (send dc make-layer))
+  (send dc set-transformation old-t)
+  layer)
+
+(define (transformation-to-matrix v)
+  (define im (vector-ref v 0))
   (define mx (make-cairo_matrix_t (vector-ref im 0)
                                   (vector-ref im 1)
                                   (vector-ref im 2)
                                   (vector-ref im 3)
                                   (vector-ref im 4)
                                   (vector-ref im 5)))
-  (cairo_matrix_translate mx (dc-state-origin-x state) (dc-state-origin-y state))
-  (cairo_matrix_scale mx (dc-state-scale-x state) (dc-state-scale-y state))
-  (cairo_matrix_rotate mx (dc-state-rotation state))
-  (cairo_matrix_multiply mx
-                         (make-cairo_matrix_t (vector-ref t 0)
-                                              (vector-ref t 1)
-                                              (vector-ref t 2)
-                                              (vector-ref t 3)
-                                              (vector-ref t 4)
-                                              (vector-ref t 5))
-                         mx)
+  (cairo_matrix_translate mx (vector-ref v 1) (vector-ref v 2))
+  (cairo_matrix_scale mx (vector-ref v 3) (vector-ref v 4))
+  (cairo_matrix_rotate mx (- (vector-ref v 5)))
+  mx)
+
+(define (state-to-matrix state)
+  (transformation-to-matrix (vector (dc-state-initial-matrix state)
+                                    (dc-state-origin-x state) (dc-state-origin-y state)
+                                    (dc-state-scale-x state) (dc-state-scale-y state)
+                                    (dc-state-rotation state))))
+
+(define (transform-to-matrix t)
+  (make-cairo_matrix_t (vector-ref t 0)
+                       (vector-ref t 1)
+                       (vector-ref t 2)
+                       (vector-ref t 3)
+                       (vector-ref t 4)
+                       (vector-ref t 5)))
+
+(define (matrix-to-transform mx)
+  (vector-immutable (cairo_matrix_t-xx mx)
+                    (cairo_matrix_t-yx mx)
+                    (cairo_matrix_t-xy mx)
+                    (cairo_matrix_t-yy mx)
+                    (cairo_matrix_t-x0 mx)
+                    (cairo_matrix_t-y0 mx)))
+
+(define (apply-transform state t)
+  (define mx (state-to-matrix state))
+  (cairo_matrix_multiply mx (transform-to-matrix t) mx)
   (struct-copy dc-state state
-               [initial-matrix (vector-immutable (cairo_matrix_t-xx mx)
-                                                 (cairo_matrix_t-yx mx)
-                                                 (cairo_matrix_t-xy mx)
-                                                 (cairo_matrix_t-yy mx)
-                                                 (cairo_matrix_t-x0 mx)
-                                                 (cairo_matrix_t-y0 mx))]
+               [initial-matrix (matrix-to-transform mx)]
                [origin-x 0.0] [origin-y 0.0]
                [scale-x 1.0] [scale-y 1.0]
                [rotation 0.0]))
+
+(define (transform-wrt t state)
+  (define state-mx (state-to-matrix state))
+  (define t-mx (transformation-to-matrix t))
+  (cairo_matrix_invert state-mx)
+  (cairo_matrix_multiply t-mx t-mx state-mx)
+  (matrix-to-transform t-mx))
 
 (define (record-dc-mixin %)
   (class %
@@ -389,8 +424,10 @@
              get-pen get-brush get-font
              get-smoothing get-text-mode 
              get-background get-text-background get-text-foreground
-             get-alpha get-clipping-region
-             translate rotate scale)
+             get-alpha get-clipping-region get-size
+             translate rotate scale
+             get-transformation
+             init-owned-layer)
 
     (define record-limit +inf.0)
     (define current-size 0)
@@ -458,7 +495,7 @@
 
     (define-syntax (generate-record-unconvert stx)
       (syntax-case stx ()
-        [(_ ([clause-tags clause-rhs] ...) (defn (name arg ...)) ...)
+        [(_ record-unconvert ([clause-tags clause-rhs] ...) (defn (name arg ...)) ...)
          (with-syntax ([((arg-id ...) ...)
                         (let ([names (syntax->list #'(name ...))]
                               [argss (syntax->list #'((arg ...) ...))])
@@ -653,7 +690,32 @@
                   (install-transform dc (apply-transform state t)))
                 (lambda () `(transform ,t)))))
 
+    (define/override (make-layer)
+      (define super-layer (super make-layer))
+      (define-values (w h) (get-size))
+      (define t (get-transformation))
+      (define layer (new record-layer-dc% [super-layer super-layer] [init-matrix t] [owner this] [width w] [height h]))
+      (init-owned-layer layer) ; set pen, etc., to record the settings, but transformation is handled separately
+      layer)
+
+    (define/override (draw-owned-layer layer x y)
+      (let ([super-layer (send layer get-super-layer)])
+        (super draw-owned-layer super-layer x y))
+      (define proc (send layer get-recorded-command #f))
+      (define datum (send layer get-recorded-command #t))
+      (define t (send layer get-creation-matrix))
+      ;; recording is losing sharing here when a layer is used multiple times,
+      ;; similar to copying bitmaps when they are drawn
+      (record (lambda (dc state)
+                (define layer (make-layer-in-transformation dc t state))
+                (proc layer)
+                (send dc draw-layer layer x y)
+                state)
+              (lambda ()
+                `(draw-layer ,datum ,t ,x ,y))))
+
     (generate-record-unconvert
+     record-unconvert
      ([(set-clipping-region) (lambda (r) 
                                (define make-r (unconvert-region r))
                                (lambda (dc state)
@@ -689,7 +751,18 @@
                                 (install-transform dc (struct-copy dc-state state [initial-matrix mi]))))]
       [(transform) (lambda (t)
                      (lambda (dc state)
-                       (install-transform dc (apply-transform state t))))])
+                       (install-transform dc (apply-transform state t))))]
+      [(erase) (lambda ()
+                 (lambda (dc state)
+                   (send dc erase)
+                   state))]
+      [(draw-layer) (lambda (datum t x y)
+                      (define layer-drawer (generate-drawer (record-unconvert datum)))
+                      (lambda (dc state)
+                        (define layer (make-layer-in-transformation dc t state))
+                        (layer-drawer layer)
+                        (send dc draw-layer layer x y)
+                        state))])
      ;; remaining clauses are generated:
 
      (define/record (set-smoothing s))
@@ -761,7 +834,7 @@
 
     (define/override (ok?) #t)
 
-    ;; We need a cair context and surface to measure text:
+    ;; We need a cairo context and surface to measure text:
     (define c (cairo_create (cairo_image_surface_create CAIRO_FORMAT_ARGB32 1 1)))
     (define/override (get-cr) c)
 
@@ -786,6 +859,66 @@
     
     (super-new)
     (reset-recording)))
+
+(define (record-layer-mixin %)
+  (class %
+    (init super-layer)
+    (define saved-super-layer super-layer)
+    (define/public (get-super-layer) saved-super-layer)
+
+    (define-syntax (define/tee stx)
+      (syntax-case stx ()
+        [(_ (name arg ...))
+         (with-syntax ([(call-arg ...) (for/list ([arg (in-list (syntax->list #'(arg ...)))])
+                                         (syntax-case arg ()
+                                           [(name default) #'name]
+                                           [_ arg]))])
+           #'(define/override (name arg ...)
+               (send saved-super-layer name call-arg ...)
+               (super name call-arg ...)))]))
+
+    (define/tee (set-clipping-region r))
+    (define/tee (set-alpha a))
+    (define/tee (set-scale sx sy))
+    (define/tee (set-origin ox oy))
+    (define/tee (set-rotation r))
+    (define/tee (set-initial-matrix mi))
+    (define/tee (transform t))
+    (define/tee (erase))
+    (define/tee (draw-layer layer [x 0] [y 0]))
+    (define/tee (set-smoothing s))
+    (define/tee (set-font f))
+    (define/tee (do-set-pen! p))
+    (define/tee (do-set-brush! b))
+    (define/tee (set-text-foreground c))
+    (define/tee (set-text-background c))     
+    (define/tee (set-background c))     
+    (define/tee (set-text-mode m))    
+    (define/tee (clear))    
+    (define/tee (draw-arc x y width height start-radians end-radians))
+    (define/tee (draw-ellipse x y w h))    
+    (define/tee (draw-line x1 y1 x2 y2))    
+    (define/tee (draw-point x y))     
+    (define/tee (draw-lines pts [x 0.0] [y 0.0]))
+    (define/tee (draw-polygon pts [x 0.0] [y 0.0] [fill-style 'odd-even]))
+    (define/tee (draw-rectangle x y w h))
+    (define/tee (draw-rounded-rectangle x y w h [radius -0.25]))
+    (define/tee (draw-spline x1 y1 x2 y2 x3 y3))
+    (define/tee (draw-path path [x 0.0] [y 0.0] [fill-style 'odd-even]))
+    (define/tee (draw-text s x y [combine? #f] [offset 0] [angle 0.0]))
+    (define/tee (draw-bitmap src dx dy [style 'solid] [color black] [mask #f]))
+    (define/tee (draw-bitmap-section src dx dy sx sy sw sh [style 'solid] [color black] [mask #f]))
+    
+    (super-new)
+
+    (inherit get-creation-matrix
+             set-intial-composable-transformation)
+    (let ([t (get-creation-matrix)])
+      ;; set the DC's transformation without recording actions,
+      ;; because actions would install these settings on replay
+      (set-intial-composable-transformation t))))      
+
+(define record-layer-dc% (record-layer-mixin (record-dc-mixin (dc-mixin (layer-mixin record-dc-backend%)))))
 
 (define (recorded-datum->procedure d)
   (generate-drawer/restore (send (new record-dc%) record-unconvert d)))

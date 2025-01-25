@@ -93,6 +93,9 @@
 
 (define-cairo cairo_surface_create_similar
   (_cfun _cairo_surface_t _int _int _int -> _cairo_surface_t))
+(define-cairo cairo_surface_create_similar_image
+  (_cfun _cairo_surface_t _int _int _int -> _cairo_surface_t)
+  #:fail (lambda () cairo_surface_create_similar))
 
 (define-cairo cairo_xlib_surface_create (_cfun _pointer ; Display*
                                                _ulong   ; Drawable
@@ -192,6 +195,13 @@
   (_cfun _int _cairo_rectangle_t-pointer/null -> _cairo_surface_t)
   #:wrap (allocator cairo_surface_destroy)
   #:fail (lambda () (lambda (kind rect) #f)))
+(define-cairo cairo_recording_surface_ink_extents (_cfun _cairo_surface_t
+                                                         (x : (_ptr/immobile o _double))
+                                                         (y : (_ptr/immobile o _double))
+                                                         (w : (_ptr/immobile o _double))
+                                                         (h : (_ptr/immobile o _double))
+                                                         -> _void
+                                                         -> (values x y w h)))
 
 ;; Transforms
 (define-cairo cairo_translate (_cfun _cairo_t _double* _double* -> _void))
@@ -208,6 +218,7 @@
 (define-cairo cairo_matrix_scale (_cfun _cairo_matrix_t-pointer _double* _double* -> _void))
 (define-cairo cairo_matrix_rotate (_cfun _cairo_matrix_t-pointer _double* -> _void))
 (define-cairo cairo_matrix_multiply (_cfun _cairo_matrix_t-pointer _cairo_matrix_t-pointer _cairo_matrix_t-pointer -> _void))
+(define-cairo cairo_matrix_invert (_cfun _cairo_matrix_t-pointer -> _int))
 
 ;; Stroke & Fill
 (define-cairo cairo_set_source_rgb (_cfun _cairo_t _double* _double* _double* -> _void))

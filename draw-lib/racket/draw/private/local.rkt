@@ -27,6 +27,9 @@
   get-clipping-matrix
   reset-config
   internal-copy
+  draw-owned-layer
+  init-owned-layer
+  set-intial-composable-transformation
 
   ;; region%
   install-region
@@ -59,4 +62,11 @@
   can-combine-text?
   can-mask-bitmap?
   reset-clip
-  get-clear-operator)
+  get-clear-operator
+
+  ;; layer-dc-backend<%>
+  get-owner
+  get-creation-matrix
+
+  ;; record-dc-layer%
+  get-super-layer)

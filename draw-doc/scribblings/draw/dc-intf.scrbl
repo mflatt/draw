@@ -196,6 +196,24 @@ Brush filling and pen outline meet so that no space is left between
 
 }
 
+@defmethod[(draw-layer [layer-dc (is-a/c dc<%>)]
+                       [x real? 0]
+                       [y real? 0])
+           void?]{
+
+Transfers the content of @racket[layer-dc] to the drawing context,
+shifting the content by @racket[x] and @racket[y] in addition to
+applying the drawing context's opacity and clipping region. The
+drawing context's transformation is applied relative to the
+transformation at the time the layer was created.
+
+The @racket[layer-dc] must have been created by the drawing context's
+@method[dc<%> make-layer] method. See @method[dc<%> make-layer] for
+more information.
+
+@history[#:added "1.21"]}
+
+
 @defmethod[(draw-line [x1 real?]
                       [y1 real?]
                       [x2 real?]
@@ -842,6 +860,29 @@ See also @method[font% screen-glyph-exists?] .
 
 }
 
+@defmethod[(make-layer)
+           (is-a/c dc<%>)]{
+
+Creates a layer that accumulates drawing to be rendered via
+@method[dc<%> draw-layer]. A layer is particularly useful for image
+compositing with a opacity below @racket[1]. Without a layer, when
+@method[dc<%> set-alpha] is used to change opacity, it affects every
+individual drawing operation, so operations that produce overlapping
+output get opacities added. When drawing first to a layer (with
+opacity @racket[1]) and then drawing the layer with a lower opacity,
+the layer's content is transferred to the destination drawing context
+as a single operation, so opacity is applied once.
+
+A layer inherits the non-opacity, non-clipping configuration of the
+drawing context used to create the layer, but subsequent modifications
+to the layer (e.g., changing its pen or clipping region) affect the
+layer, only. A layer's content can be transferred via @method[dc<%>
+draw-layer] only to the drawing context whose @method[dc<%>
+make-layer] method was called to created the layer.
+
+@history[#:added "1.21"]}
+
+
 @defmethod[(ok?)
            boolean?]{
 
@@ -913,7 +954,9 @@ to completely transparent (i.e., invisible) drawing, and @racket[1.0]
 corresponds to completely opaque drawing. For intermediate values,
 drawing is blended with the existing content of the drawing context.
 A color (e.g. for a brush) also has an alpha value; it is combined
-with the drawing context's alpha by multiplying.}
+with the drawing context's alpha by multiplying.
+
+See also @method[dc<%> make-layer].}
 
 
 @defmethod*[([(set-background [color (is-a?/c color%)])

@@ -27,6 +27,8 @@
 (provide dc-mixin
          dc-backend<%>
          default-dc-backend%
+         layer-dc-backend<%>
+         layer-mixin
          do-set-pen!
          do-set-brush!
          (protect-out set-font-map-init-hook!))
@@ -551,6 +553,20 @@
       (set-scale (vector-ref v 3) (vector-ref v 4))
       (set-rotation (vector-ref v 5)))
 
+    ;; used by a record-dc% layer to initialize state without
+    ;; recording actions
+    (define/public (set-intial-composable-transformation v)
+      (let ([m (vector-ref v 0)])
+        (set! matrix (vector->matrix m)))
+      (set! origin-x (vector-ref v 1))
+      (set! origin-y (vector-ref v 2))
+      (set! scale-x (vector-ref v 3))
+      (set! scale-y (vector-ref v 4))
+      (set! rotation (vector-ref v 5))
+      (reset-effective!)
+      (reset-align!)
+      (reset-matrix))
+
     (define/private (do-reset-matrix cr)
       (cairo_identity_matrix cr)
       (init-cr-matrix cr)
@@ -858,6 +874,11 @@
                    (loop x y (- w dx) h x2 y2)])]))
              (cairo_set_operator cr CAIRO_OPERATOR_OVER)))))
 
+    (define/private (install-smoothing cr)
+      (cairo_set_antialias cr (case (dc-adjust-smoothing smoothing)
+                                [(unsmoothed) CAIRO_ANTIALIAS_NONE]
+                                [else CAIRO_ANTIALIAS_GRAY])))
+
     (define/private (make-pattern-surface cr col draw)
       (let* ([s (cairo_surface_create_similar (cairo_get_target cr)
                                               CAIRO_CONTENT_COLOR_ALPHA
@@ -866,9 +887,7 @@
         (install-color cr2 col alpha #f)
         (cairo_set_line_width cr2 1)
         (cairo_set_line_cap cr CAIRO_LINE_CAP_ROUND)
-        (cairo_set_antialias cr2 (case (dc-adjust-smoothing smoothing)
-                                   [(unsmoothed) CAIRO_ANTIALIAS_NONE]
-                                   [else CAIRO_ANTIALIAS_GRAY]))
+        (install-smoothing cr2)
         (draw cr2)
         (cairo_stroke cr2)
         (cairo_destroy cr2)
@@ -945,9 +964,7 @@
           (when transformation
             (do-reset-matrix cr))
           (cairo_pattern_destroy p)))
-      (cairo_set_antialias cr (case (dc-adjust-smoothing smoothing)
-                                [(unsmoothed) CAIRO_ANTIALIAS_NONE]
-                                [else CAIRO_ANTIALIAS_GRAY]))
+      (install-smoothing cr)
       (when brush?
         (let ([s (send brush get-style)])
           (unless (eq? 'transparent s)
@@ -2189,9 +2206,120 @@
                                (s-sel (cairo_matrix_t-xx mx)
                                       (cairo_matrix_t-yy mx)))))))))
 
+    (define/public (make-layer)
+      (define layer (new surface-layer-dc% [owner this] [init-matrix (get-current-matrix)]))
+      (init-owned-layer layer)
+      (send layer set-alignment-scale alignment-scale)
+      (send layer set-transformation (get-transformation))
+      layer)
+
+    (define/public (init-owned-layer layer)
+      (send layer set-pen pen)
+      (send layer set-brush brush)
+      (send layer set-font font)
+      (send layer set-text-foreground text-fg)
+      (send layer set-text-background text-bg)
+      (send layer set-smoothing smoothing))
+
+    (def/public (draw-layer [dc<%> layer] [real? [x 0]] [real? [y 0]])
+      (unless (and (is-a? layer layer-dc-backend<%>)
+                   (object=? this (send layer get-owner)))
+        (raise-arguments-error (method-name 'dc<%> 'draw-layer)
+                               (string-append "the given dc<%> does not belong to this dc<%>;\n"
+                                              " it was not created by a call to `make-layer`"
+                                              " on this object")))
+      (draw-owned-layer layer x y))
+
+    (define/public (draw-owned-layer layer x y)
+      (define surface (send layer get-cairo-surface))
+
+      ;; set transformation to difference of current transformation
+      ;; relative to the creation-time transformation
+      (define init-matrix (send layer get-creation-matrix))
+      (define rev-matrix
+        (make-cairo_matrix_t (cairo_matrix_t-xx init-matrix)
+                             (cairo_matrix_t-yx init-matrix)
+                             (cairo_matrix_t-xy init-matrix)
+                             (cairo_matrix_t-yy init-matrix)
+                             (cairo_matrix_t-x0 init-matrix)
+                             (cairo_matrix_t-y0 init-matrix)))
+      (cairo_matrix_invert rev-matrix)
+      (define matrix (get-current-matrix))
+      (cairo_matrix_multiply matrix matrix rev-matrix)
+ 
+      (with-cr
+        (check-ok 'draw-layer)
+        cr
+        (cairo_save cr)
+        (cairo_set_matrix cr matrix)
+        (let ()
+          (define dx (+ (align-x/delta x 0) scroll-dx))
+          (define dy (+ (align-y/delta y 0) scroll-dy))
+          (let-values ([(x y w h) (cairo_recording_surface_ink_extents surface)])
+            (cairo_rectangle cr (+ dx x) (+ dy y) w h)
+            (cairo_clip cr))
+          (cairo_set_source_surface cr surface dx dy)
+          (cairo_paint_with_alpha cr alpha)
+          (cairo_restore cr))
+        (flush-cr)))
+
     (super-new))
 
   dc%)
+
+(define layer-dc-backend<%>
+  (interface (dc-backend<%>)
+    get-owner))
+
+(define-syntax-rule (define-proxy-methods #:to target method-name ...)
+  (begin
+    (define/override (method-name . args)
+      (send target method-name . args))
+    ...))
+
+(define layer-mixin
+  (mixin (dc-backend<%>) (layer-dc-backend<%>)
+    (init owner init-matrix)
+    (define owner-dc owner)
+    (define creation-matrix init-matrix)
+    (define/public (get-owner) owner-dc)
+    (define/public (get-creation-matrix) creation-matrix)
+
+    (define-proxy-methods #:to owner-dc
+      get-pango
+      collapse-bitmap-b&w?
+      get-font-metrics-key
+      dc-adjust-smoothing
+      dc-adjust-cap-shape
+      get-hairline-width
+      install-color
+      get-size
+      get-device-scale
+      get-backing-scale
+      can-combine-text?
+      can-mask-bitmap?
+      get-clear-operator
+      init-cr-matrix
+      init-effective-matrix)
+
+    (super-new)))
+
+(define surface-layer-dc%
+  (dc-mixin
+   (class (layer-mixin default-dc-backend%)
+     (define surface (cairo_recording_surface_create CAIRO_CONTENT_COLOR_ALPHA #f))
+     
+     (unless surface
+       (raise (exn:fail:unsupported
+               (format (string-append "~a: operation not supported by backend")
+                       (method-name 'dc<%> 'new-layer))
+              (current-continuation-marks))))
+
+     (define cr (cairo_create surface))
+     (define/public (get-cairo-surface) surface)
+     (define/override (get-cr) cr)
+
+     (super-new))))
 
 (set-text-to-path!
  (lambda (font str x y combine-mode)
